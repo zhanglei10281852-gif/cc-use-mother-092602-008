@@ -293,6 +293,70 @@ CREATE TABLE IF NOT EXISTS compute_interventions (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_compute_interventions_task ON compute_interventions(task_id,id);
+
+CREATE TABLE IF NOT EXISTS orchestration_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_key TEXT NOT NULL,
+    batch_digest TEXT NOT NULL,
+    name TEXT NOT NULL,
+    project_code TEXT NOT NULL,
+    requested_by TEXT NOT NULL,
+    resource_budget INTEGER NOT NULL CHECK(resource_budget > 0),
+    reserved_units INTEGER NOT NULL CHECK(reserved_units >= 0),
+    max_parallel INTEGER NOT NULL CHECK(max_parallel > 0),
+    node_count INTEGER NOT NULL CHECK(node_count > 0),
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','completed','partial','failed')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(requested_by, batch_key)
+);
+CREATE TABLE IF NOT EXISTS orchestration_nodes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL REFERENCES orchestration_batches(id) ON DELETE CASCADE,
+    node_key TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    resource_units INTEGER NOT NULL CHECK(resource_units > 0),
+    max_attempts INTEGER NOT NULL CHECK(max_attempts > 0),
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    priority INTEGER NOT NULL DEFAULT 50 CHECK(priority BETWEEN 0 AND 100),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','ready','running','succeeded','failed','blocked','skipped')),
+    worker_id TEXT NOT NULL DEFAULT '',
+    lease_expires_at TEXT NOT NULL DEFAULT '',
+    available_at TEXT NOT NULL,
+    last_error_code TEXT NOT NULL DEFAULT '',
+    last_error_message TEXT NOT NULL DEFAULT '',
+    skip_reason TEXT NOT NULL DEFAULT '',
+    skipped_by TEXT NOT NULL DEFAULT '',
+    result_json TEXT,
+    started_at TEXT,
+    finished_at TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(batch_id, node_key)
+);
+CREATE INDEX IF NOT EXISTS idx_orch_nodes_batch ON orchestration_nodes(batch_id,status);
+CREATE INDEX IF NOT EXISTS idx_orch_nodes_ready ON orchestration_nodes(status,available_at,priority DESC);
+CREATE TABLE IF NOT EXISTS orchestration_edges (
+    batch_id INTEGER NOT NULL REFERENCES orchestration_batches(id) ON DELETE CASCADE,
+    node_id INTEGER NOT NULL REFERENCES orchestration_nodes(id) ON DELETE CASCADE,
+    depends_on_id INTEGER NOT NULL REFERENCES orchestration_nodes(id) ON DELETE CASCADE,
+    PRIMARY KEY(node_id, depends_on_id)
+);
+CREATE INDEX IF NOT EXISTS idx_orch_edges_upstream ON orchestration_edges(depends_on_id);
+CREATE TABLE IF NOT EXISTS orchestration_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL REFERENCES orchestration_batches(id) ON DELETE CASCADE,
+    node_id INTEGER REFERENCES orchestration_nodes(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    from_status TEXT NOT NULL DEFAULT '',
+    to_status TEXT NOT NULL DEFAULT '',
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_orch_events_batch ON orchestration_events(batch_id,id);
 '''
 
 PERMISSIONS = [
@@ -311,6 +375,8 @@ PERMISSIONS = [
     ("announcements.write", "维护公告", "announcements", "write"),
     ("audit.read", "查看审计", "audit", "read"),
     ("jobs.run", "执行后台任务", "jobs", "run"),
+    ("orchestration.skip", "人工跳过编排节点", "orchestration", "skip"),
+    ("orchestration.retry", "恢复重试编排批次", "orchestration", "retry"),
 ]
 
 
