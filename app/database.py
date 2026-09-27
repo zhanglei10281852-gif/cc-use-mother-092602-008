@@ -311,6 +311,9 @@ PERMISSIONS = [
     ("announcements.write", "维护公告", "announcements", "write"),
     ("audit.read", "查看审计", "audit", "read"),
     ("jobs.run", "执行后台任务", "jobs", "run"),
+    ("orchestration.skip", "跳过编排节点", "orchestration", "skip"),
+    ("orchestration.retry", "重试编排节点", "orchestration", "retry"),
+    ("orchestration.cancel", "取消编排批次", "orchestration", "cancel"),
 ]
 
 

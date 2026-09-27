@@ -13,6 +13,7 @@
 - 结果版本：每次成功回执保存不可变结果、指标摘要和内容摘要，任务指向当前结果版本。
 - 人工干预：取消、人工重试、优先级调整和批量操作均保留操作者、原因、前后状态和批次标识。
 - 登录与角色：基础管理模块提供管理员初始化、用户、角色、会话和细粒度权限。
+- DAG 依赖编排（`app/orchestration`）：提交带依赖 DAG 的观测分析批次（校准→推理→压缩→回传），提交时校验循环、缺失依赖和资源可行性；工作者按就绪顺序领取节点并受批次资源容量约束；上游硬失败会把未启动的后继标记为系统传播跳过，不继续消耗算力，已完成分支保留并可复用；支持退避重试、租约过期恢复、受权限控制的人工跳过/重试/取消（必须填写理由），并在每次状态收敛时生成带结果摘要、根因和事件时间线的可追溯批次摘要。
 
 ## 运行环境
 
@@ -57,7 +58,7 @@ curl -sS http://127.0.0.1:8432/api/system/health
 python -m pytest
 ```
 
-测试覆盖参数规则、幂等提交、配额拒绝、优先级领取、能力匹配、租约续期、失败退避、结果版本、取消、人工重试、批量操作和租约恢复，并保留身份与既有科学计算模块的回归用例。
+测试覆盖参数规则、幂等提交、配额拒绝、优先级领取、能力匹配、租约续期、失败退避、结果版本、取消、人工重试、批量操作和租约恢复，以及 DAG 编排的循环/资源校验、两级幂等、就绪领取与资源容量、失败传播与分支复用、退避重试、租约恢复、带权限理由的人工跳过/重试/取消、批次摘要追溯和身份与既有模块的回归用例。
 
 ## 编译检查
 
@@ -74,11 +75,36 @@ python -m app.cli compute-demo
 
 `smoke` 在进程内检查根路径和健康接口，`compute-demo` 会创建示例参数模板、提交一个计算任务并让匹配能力的工作者领取，用于快速确认核心运营链路。
 
+## DAG 依赖编排
+
+观测分析批次以 DAG 描述节点（如校准、推理、压缩、回传）及其依赖，接口前缀为 `/api/orchestration`：
+
+- `POST /batches`：提交批次。批次键 `batch_key`（按提交人幂等）与每个节点 `payload.idempotency_key`（全局唯一）相互独立；同键重放返回同一批次，节点键复用会被拒绝，成功节点不会因重试而重复执行。
+- `GET /batches/{id}/topology`、`GET /batches/{id}`、`GET /batches/{id}/summary`：查看拓扑边、全部节点状态、事件时间线和批次摘要。
+- `POST /claim`：工作者按 `优先级降序、提交顺序` 领取就绪节点，支持 `stages` 能力过滤和 `max_nodes` 批量领取；返回的 `lease_token` 用于续租与回执。
+- `POST /nodes/{id}/heartbeat|complete|fail`：续租、成功回执（保存结果摘要）、失败回执（可重试错误按指数退避重新排队，次数耗尽转为终态失败）。
+- `POST /nodes/{id}/skip`、`POST /nodes/{id}/retry`：人工跳过（视为该步有意省略，后继继续）与人工重试（仅复活被系统传播跳过的下游，成功节点不重跑）；均要求会话令牌、对应权限和非空理由，并写入审计日志。
+- `POST /batches/{id}/cancel`：取消批次，未启动节点立即终止，运行中节点收敛后批次转为 `cancelled` 或 `partial`。
+- `POST /recovery/expired-leases`：恢复租约过期节点，仍有预算则退避重排，否则失败并传播。
+
+节点状态为 `blocked → ready → running → succeeded/failed/skipped/cancelled`；批次状态为 `pending → running/cancelling → succeeded/partial/failed/cancelled`。上游 `failed/cancelled` 会级联地把未启动后继标记为系统传播 `skipped`，因此失败分支不再领取执行，而已完成的独立分支保留在摘要的 `completed_branches` 中，根因与其传播到的节点列在 `root_causes` 中。
+
+命令行检查（配合 `TOWNSHIP_DATABASE_PATH` 指定数据库）：
+
+```bash
+python -m app.cli orch-demo                  # 端到端演示：校准辐射翻转失败后的传播与部分完成
+python -m app.cli orch-topology <batch_id>   # 查看 DAG 节点、边和资源容量
+python -m app.cli orch-status <batch_id>     # 查看节点状态与事件时间线
+python -m app.cli orch-summary <batch_id>    # 查看可追溯批次摘要
+python -m app.cli orch-recover               # 执行租约恢复
+```
+
 ## 目录结构
 
 ```text
 app/
   compute/         计算模板、配额、任务、结果版本和人工干预
+  orchestration/   观测分析 DAG 批次编排：拓扑校验、调度、传播、租约、幂等和摘要
   api/             用户、角色、认证、审计和系统管理接口
   core/            时钟、安全、异常和分页能力
   repositories/    通用 SQLite 查询
